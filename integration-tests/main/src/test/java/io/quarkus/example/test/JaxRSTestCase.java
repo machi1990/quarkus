@@ -122,4 +122,23 @@ public class JaxRSTestCase {
                 .body("name", is("my entity name"),
                         "value", is("my entity value"));
     }
+
+    @Test
+    public void testOpenApiSchemaResponse() {
+        RestAssured.when().get("/test/openapi").then()
+                .body("name", is("my openapi entity name"));
+    }
+
+    @Test
+    public void testOpenApiSchemaResponsesV1() {
+        RestAssured.when().get("/test/openapi/v1").then()
+                .body("name", is("my openapi entity version one name"));
+    }
+
+    @Test
+    public void testOpenApiSchemaResponsesV2() {
+        RestAssured.when().get("/test/openapi/v2").then()
+                .body("name", is("my openapi entity version two name"),
+                        "value", is("v2"));
+    }
 }

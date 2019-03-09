@@ -38,6 +38,12 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import javax.xml.bind.annotation.XmlRootElement;
 
+import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponses;
+
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.reactivex.Single;
 
@@ -156,6 +162,36 @@ public class TestResource {
         entity.setName("my entity name");
         entity.setValue("my entity value");
         return Response.ok(entity).build();
+    }
+
+    @GET
+    @Path("/openapi")
+    @Produces("application/json")
+    @APIResponse(content = @Content(mediaType = "application/json", schema = @Schema(type = SchemaType.OBJECT, implementation = MyOpenApiEntityV1.class)))
+    public MyOpenApiEntityV1 openApiResponse() {
+        MyOpenApiEntityV1 entity = new MyOpenApiEntityV1();
+        entity.setName("my openapi entity name");
+        return entity;
+    }
+
+    @GET
+    @Path("/openapi/{version}")
+    @Produces("application/json")
+    @APIResponses({
+            @APIResponse(content = @Content(mediaType = "application/json", schema = @Schema(type = SchemaType.OBJECT, implementation = MyOpenApiEntityV1.class))),
+            @APIResponse(content = @Content(mediaType = "application/json", schema = @Schema(type = SchemaType.OBJECT, implementation = MyOpenApiEntityV2.class)))
+    })
+    public MyOpenApiEntityV1 openApiResponses(@PathParam("version") String version) {
+        if ("v1".equals(version)) {
+            MyOpenApiEntityV1 entityV1 = new MyOpenApiEntityV1();
+            entityV1.setName("my openapi entity version one name");
+            return entityV1;
+        }
+
+        MyOpenApiEntityV2 entityV2 = new MyOpenApiEntityV2();
+        entityV2.setName("my openapi entity version two name");
+        entityV2.setValue(version);
+        return entityV2;
     }
 
     @GET
@@ -286,6 +322,32 @@ public class TestResource {
         public void setName(String name) {
             this.name = name;
         }
+
+        public String getValue() {
+            return value;
+        }
+
+        public void setValue(String value) {
+            this.value = value;
+        }
+    }
+
+    @Schema()
+    public static class MyOpenApiEntityV1 {
+        private String name;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+    }
+
+    @Schema()
+    public static class MyOpenApiEntityV2 extends MyOpenApiEntityV1 {
+        private String value;
 
         public String getValue() {
             return value;

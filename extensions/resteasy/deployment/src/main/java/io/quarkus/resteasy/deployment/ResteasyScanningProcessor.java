@@ -29,7 +29,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import javax.inject.Singleton;
-import javax.net.ssl.TrustManager;
 import javax.servlet.DispatcherType;
 import javax.ws.rs.ApplicationPath;
 import javax.ws.rs.Consumes;
@@ -41,8 +40,6 @@ import javax.ws.rs.core.Application;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import javax.ws.rs.core.SecurityContext;
-import javax.ws.rs.core.UriInfo;
 import javax.ws.rs.ext.ContextResolver;
 import javax.ws.rs.ext.MessageBodyReader;
 import javax.ws.rs.ext.MessageBodyWriter;
@@ -52,6 +49,7 @@ import javax.ws.rs.ext.Providers;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationTarget;
 import org.jboss.jandex.AnnotationTarget.Kind;
+import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ClassInfo;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
@@ -99,7 +97,6 @@ import io.quarkus.undertow.deployment.ServletInitParamBuildItem;
  * @author Stuart Douglas
  */
 public class ResteasyScanningProcessor {
-
     private static final String JAVAX_WS_RS_APPLICATION = Application.class.getName();
     private static final String JAX_RS_FILTER_NAME = JAVAX_WS_RS_APPLICATION;
     private static final String JAX_RS_SERVLET_NAME = JAVAX_WS_RS_APPLICATION;
@@ -138,6 +135,13 @@ public class ResteasyScanningProcessor {
 
     private static final DotName JSONB_ANNOTATION = DotName.createSimple("javax.json.bind.annotation.JsonbAnnotation");
 
+    private static final DotName API_SCHEMA = DotName.createSimple("org.eclipse.microprofile.openapi.annotations.media.Schema");
+    private static final DotName API_RESPONSE = DotName
+            .createSimple("org.eclipse.microprofile.openapi.annotations.responses.APIResponse");
+
+    private static final DotName API_RESPONSES = DotName
+            .createSimple("org.eclipse.microprofile.openapi.annotations.responses.APIResponses");
+
     private static final Set<DotName> TYPES_IGNORED_FOR_REFLECTION = new HashSet<>(Arrays.asList(
             // javax.json
             DotName.createSimple("javax.json.JsonObject"),
@@ -175,6 +179,14 @@ public class ResteasyScanningProcessor {
             new ProviderDiscoverer(PUT, true, false)
     };
     private static final DotName SINGLETON_SCOPE = DotName.createSimple(Singleton.class.getName());
+
+    private static final String CONTENT = "content";
+    private static final String SCHEMA = "schema";
+    private static final String SCHEMA_IMPLEMENTATION_CLASS = "implementation";
+    private static final String NOT_SCHEMA_CLASS = "not";
+    private static final String SCHEMA_ONE_OF_CLASS = "oneOf";
+    private static final String SCHEMA_ANY_OF_CLASS = "anyOf";
+    private static final String SCHEMA_ALL_OF_CLASS = "allOf";
 
     /**
      * JAX-RS configuration.
@@ -530,9 +542,87 @@ public class ResteasyScanningProcessor {
             }
         }
 
+        // Generate reflection declaration from MP OpenAPI Schema definition
+        // They are needed for serialization.
+        Collection<AnnotationInstance> schemaAnnotationInstances = index.getAnnotations(API_SCHEMA);
+        for (AnnotationInstance schemaAnnotationInstance : schemaAnnotationInstances) {
+            AnnotationTarget typeTarget = schemaAnnotationInstance.target();
+            if (typeTarget.kind() != Kind.CLASS) {
+                continue;
+            }
+            reflectiveHierarchy
+                    .produce(new ReflectiveHierarchyBuildItem(Type.create(typeTarget.asClass().name(), Type.Kind.CLASS)));
+        }
+
+        // Generate reflection declaration from MP OpenAPI APIResponse schema definition
+        // They are needed for serialization
+        Collection<AnnotationInstance> apiResponseAnnotationInstances = index.getAnnotations(API_RESPONSE);
+        registerReflectionForApiResponseSchemaSerialization(reflectiveClass, reflectiveHierarchy,
+                apiResponseAnnotationInstances);
+
+        // Generate reflection declaration from MP OpenAPI APIResponses schema definition
+        // They are needed for serialization
+        Collection<AnnotationInstance> apiResponsesAnnotationInstances = index.getAnnotations(API_RESPONSES);
+        for (AnnotationInstance apiResponsesAnnotationInstance : apiResponsesAnnotationInstances) {
+            AnnotationValue apiResponsesAnnotationValue = apiResponsesAnnotationInstance.value();
+            if (apiResponsesAnnotationValue == null) {
+                continue;
+            }
+            registerReflectionForApiResponseSchemaSerialization(reflectiveClass, reflectiveHierarchy,
+                    Arrays.asList(apiResponsesAnnotationValue.asNestedArray()));
+        }
+
         // In the case of a constraint violation, these elements might be returned as entities and will be serialized
         reflectiveClass.produce(new ReflectiveClassBuildItem(true, true, ViolationReport.class.getName()));
         reflectiveClass.produce(new ReflectiveClassBuildItem(true, true, ResteasyConstraintViolation.class.getName()));
+    }
+
+    private void registerReflectionForApiResponseSchemaSerialization(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
+            BuildProducer<ReflectiveHierarchyBuildItem> reflectiveHierarchy,
+            Collection<AnnotationInstance> apiResponseAnnotationInstances) {
+        for (AnnotationInstance apiResponseAnnotationInstance : apiResponseAnnotationInstances) {
+            AnnotationInstance[] contents = apiResponseAnnotationInstance.value(CONTENT).asNestedArray();
+            if (contents == null) {
+                continue;
+            }
+            for (AnnotationInstance content : contents) {
+                AnnotationInstance schema = content.value(SCHEMA).asNested();
+                if (schema == null) {
+                    continue;
+                }
+
+                AnnotationValue schemaImplementationClass = schema.value(SCHEMA_IMPLEMENTATION_CLASS);
+                if (schemaImplementationClass != null) {
+                    reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaImplementationClass.asClass()));
+                }
+
+                AnnotationValue schemaNotClass = schema.value(NOT_SCHEMA_CLASS);
+                if (schemaNotClass != null) {
+                    reflectiveClass.produce(new ReflectiveClassBuildItem(true, true, schemaNotClass.asString()));
+                }
+
+                AnnotationValue schemaOneOfClasses = schema.value(SCHEMA_ONE_OF_CLASS);
+                if (schemaOneOfClasses != null) {
+                    for (Type schemaOneOfClass : schemaOneOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaOneOfClass));
+                    }
+                }
+
+                AnnotationValue schemaAnyOfClasses = schema.value(SCHEMA_ANY_OF_CLASS);
+                if (schemaAnyOfClasses != null) {
+                    for (Type schemaAnyOfClass : schemaAnyOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaAnyOfClass));
+                    }
+                }
+
+                AnnotationValue schemaAllOfClasses = schema.value(SCHEMA_ALL_OF_CLASS);
+                if (schemaAllOfClasses != null) {
+                    for (Type schemaAllOfClass : schemaAllOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaAllOfClass));
+                    }
+                }
+            }
+        }
     }
 
     private static void categorizeProviders(Set<String> availableProviders, MediaTypeMap<String> categorizedReaders,
