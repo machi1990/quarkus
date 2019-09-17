@@ -1,21 +1,25 @@
 package io.quarkus.hibernate.orm.panache.deployment;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
 
 import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.PersistenceUnit;
 
-import org.jboss.jandex.ClassInfo;
-import org.jboss.jandex.DotName;
-import org.jboss.jandex.Type;
+import org.jboss.jandex.*;
 
 import io.quarkus.arc.deployment.UnremovableBeanBuildItem;
 import io.quarkus.arc.processor.BeanInfo;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
+import io.quarkus.deployment.annotations.ExecutionTime;
+import io.quarkus.deployment.annotations.Record;
 import io.quarkus.deployment.builditem.ApplicationIndexBuildItem;
 import io.quarkus.deployment.builditem.BytecodeTransformerBuildItem;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
@@ -25,6 +29,7 @@ import io.quarkus.hibernate.orm.panache.PanacheEntity;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import io.quarkus.hibernate.orm.panache.PanacheRepository;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
+import io.quarkus.hibernate.orm.panache.runtime.PanacheRecorder;
 import io.quarkus.panache.common.deployment.EntityField;
 import io.quarkus.panache.common.deployment.EntityModel;
 import io.quarkus.panache.common.deployment.MetamodelInfo;
@@ -36,6 +41,9 @@ public final class PanacheResourceProcessor {
     private static final DotName DOTNAME_PANACHE_REPOSITORY = DotName.createSimple(PanacheRepository.class.getName());
     static final DotName DOTNAME_PANACHE_ENTITY_BASE = DotName.createSimple(PanacheEntityBase.class.getName());
     private static final DotName DOTNAME_PANACHE_ENTITY = DotName.createSimple(PanacheEntity.class.getName());
+
+    private static final DotName DOTNAME_PERSISTENCE_UNIT = DotName.createSimple(PersistenceUnit.class.getName());
+    private static final DotName DOTNAME_PERSISTENCE_CONTEXT = DotName.createSimple(PersistenceContext.class.getName());
 
     private static final Set<DotName> UNREMOVABLE_BEANS = Collections.singleton(
             DotName.createSimple(EntityManager.class.getName()));
@@ -65,9 +73,28 @@ public final class PanacheResourceProcessor {
     }
 
     @BuildStep
+    @Record(ExecutionTime.STATIC_INIT)
+    public void recordPersistenceUnit(
+            PanacheRecorder panacheRecorder,
+            List<PersistenceUnitBuildItem> persistenceUnitBuildItems) {
+        final Map<String, String> persistenceUnits = new HashMap<>();
+        for (PersistenceUnitBuildItem persistenceUnitBuildItem : persistenceUnitBuildItems) {
+            final String persistenceUnitName = persistenceUnitBuildItem.getPersistenceUnitName();
+            if (persistenceUnitName.isEmpty()) {
+                continue;
+            }
+
+            persistenceUnits.put(persistenceUnitBuildItem.getEntityClass(), persistenceUnitName);
+        }
+
+        panacheRecorder.addEntityPersistenceUnits(persistenceUnits);
+    }
+
+    @BuildStep
     void build(CombinedIndexBuildItem index,
             ApplicationIndexBuildItem applicationIndex,
             BuildProducer<BytecodeTransformerBuildItem> transformers,
+            BuildProducer<PersistenceUnitBuildItem> persistenceUnitBuildItemBuildProducer,
             HibernateEnhancersRegisteredBuildItem hibernateMarker) throws Exception {
 
         PanacheJpaRepositoryEnhancer daoEnhancer = new PanacheJpaRepositoryEnhancer(index.getIndex());
@@ -91,15 +118,23 @@ public final class PanacheResourceProcessor {
         // of PanacheEntity if we ask for subtypes of PanacheEntityBase
         for (ClassInfo classInfo : index.getIndex().getAllKnownSubclasses(DOTNAME_PANACHE_ENTITY_BASE)) {
             // FIXME: should we really skip PanacheEntity or all MappedSuperClass?
-            if (classInfo.name().equals(DOTNAME_PANACHE_ENTITY))
+            if (classInfo.name().equals(DOTNAME_PANACHE_ENTITY)) {
                 continue;
-            if (modelClasses.add(classInfo.name().toString()))
+            }
+
+            if (modelClasses.add(classInfo.name().toString())) {
                 modelEnhancer.collectFields(classInfo);
+                producePersistenceUnit(persistenceUnitBuildItemBuildProducer, classInfo);
+            }
         }
+
         for (ClassInfo classInfo : index.getIndex().getAllKnownSubclasses(DOTNAME_PANACHE_ENTITY)) {
-            if (modelClasses.add(classInfo.name().toString()))
+            if (modelClasses.add(classInfo.name().toString())) {
                 modelEnhancer.collectFields(classInfo);
+                producePersistenceUnit(persistenceUnitBuildItemBuildProducer, classInfo);
+            }
         }
+
         for (String modelClass : modelClasses) {
             transformers.produce(new BytecodeTransformerBuildItem(modelClass, modelEnhancer));
         }
@@ -116,4 +151,21 @@ public final class PanacheResourceProcessor {
         }
     }
 
+    private void producePersistenceUnit(BuildProducer<PersistenceUnitBuildItem> persistenceUnitBuildItemBuildProducer,
+            ClassInfo classInfo) {
+        AnnotationInstance annotationInstance = classInfo.classAnnotation(DOTNAME_PERSISTENCE_UNIT);
+        if (annotationInstance == null) {
+            annotationInstance = classInfo.classAnnotation(DOTNAME_PERSISTENCE_CONTEXT);
+        }
+
+        if (annotationInstance != null) {
+            final AnnotationValue unitNameValue = annotationInstance.value("unitName");
+            if (unitNameValue != null) {
+                final String unitName = unitNameValue.asString();
+                persistenceUnitBuildItemBuildProducer
+                        .produce(new PersistenceUnitBuildItem(classInfo.name().toString(), unitName));
+            }
+        }
+
+    }
 }
