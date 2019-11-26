@@ -1,0 +1,491 @@
+////
+This guide is maintained in the main Quarkus repository
+and pull requests should be submitted there:
+https://github.com/quarkusio/quarkus/tree/master/docs/src/main/asciidoc
+////
+= Quarkus - Using Redis extension
+include::./attributes.adoc[]
+
+This guide demonstrates how your Quarkus application can use the Redis extension based on https://lettuce.io/[Lettuce].
+
+[NOTE]
+====
+This extension is considered `preview`.
+API or configuration properties might change as the extension matures.
+Feedback is welcome on our https://groups.google.com/d/forum/quarkus-dev[mailing list] or as issues in our https://github.com/quarkusio/quarkus/issues[GitHub issue tracker].
+====
+
+== Prerequisites
+
+To complete this guide, you need:
+
+* less than 15 minutes
+* an IDE
+* JDK 1.8+ installed with `JAVA_HOME` configured appropriately
+* Apache Maven 3.5.3+
+* A running Redis server, or Docker Compose to start one
+* GraalVM installed if you want to run in native mode.
+
+== Architecture
+
+In this guide, we are going to expose a simple Rest API to increment numbers by using the https://redis.io/commands/incrby[`INCRBY`] command.
+Along the way, we'll see how to use other Redis commands like `GET`, `SET`, `DEL` and `KEYS`.
+
+== Solution
+
+We recommend that you follow the instructions in the next sections and create the application step by step.
+However, you can go right to the completed example.
+
+Clone the Git repository: `git clone {quickstarts-clone-url}`, or download an {quickstarts-archive-url}[archive].
+
+The solution is located in the `redis-quickstart` {quickstarts-tree-url}/redis-quickstart[directory].
+
+== Creating the Maven Project
+
+First, we need a new project. Create a new project with the following command:
+
+[source, subs=attributes+]
+----
+mvn io.quarkus:quarkus-maven-plugin:{quarkus-version}:create \
+    -DprojectGroupId=org.acme \
+    -DprojectArtifactId=redis-quickstart \
+    -Dextensions="redis, resteasy-jsonb"
+cd redis-quickstart
+----
+
+This command generates a Maven project, importing the Redis extension.
+
+== Starting the Redis server
+
+Then, we need to start a Redis instance (if you do not have one already) using the following command:
+
+[source, bash]
+----
+docker run --ulimit memlock=-1:-1 -it --rm=true --memory-swappiness=0 --name redis_quarkus_test -p 6379:6379 redis:5.0.6
+----
+
+== Configuring Redis properties
+
+Once we have the Redis server running, we need to configure the Redis connection properties.
+This is done in the `application.properties` configuration file. Edit it to the following content:
+
+[source]
+----
+quarkus.redis.hosts=localhost:6379 <1>
+----
+
+1. Configure Redis hosts to connect to. Here we connect to the server we started in the previous section
+
+== Creating the Increment POJO
+
+We are going to modelize our increments using the `Increment` POJO.
+Create the `src/main/java/org/acme/redis/Increment.java` file, with the following content:
+
+[source, java]
+----
+package org.acme.redis;
+
+public class Increment {
+    public String key; <1>
+    public int value; <2>
+
+    public Increment(String key, int value) {
+        this.key = key;
+        this.value = value;
+    }
+
+    public Increment() {
+    }
+}
+----
+
+1. The key that will be used as the Redis key
+2. The value held by the Redis key
+
+
+== Creating the Increment Service
+
+We are going to create an `IncrementService` class which will play the role of a Redis client.
+With this class, we'll be able to do the perform the `SET`, `GET` , `DELET`, `KEYS` and `INCRBY` Redis commands.
+
+Create the `src/main/java/org/acme/redis/IncrementService.java` file, with the following content:
+
+[source, java]
+----
+package org.acme.redis;
+
+import io.lettuce.core.dynamic.Commands;
+import io.lettuce.core.dynamic.annotation.Command;
+
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+public interface IncrementService extends Commands { <1>
+    default CompletableFuture<Long> del(String key) {
+        return this.del(new String[]{key});
+    }
+
+    String get(String key); <2>
+
+    CompletableFuture<Long> del(String[] key); <3>
+
+    String set(String key, Integer value); <4>
+
+    @Command("KEYS *") <4>
+    List<String> keys();
+
+    @Command("INCRBY ?0 ?1") <6>
+    void increment(String key, int incrementBy);
+}
+----
+
+1. Define a typesafe `IncrementService` using the https://lettuce.io/core/release/reference/index.html#redis-command-interfaces[Redis Command Interfaces].
+2. Define the Redis `GET` command derived from the method name
+3. Define an asynchronous Redis `DEL` command derived from the method name
+4. Define the redis `SET` command derived from the method name
+5. Define the redis `KEYS` command given through the `io.lettuce.core.dynamic.annotation.Command` annotation
+6. Define the redis `INCRBY` command given through the `io.lettuce.core.dynamic.annotation.Command` annotation
+
+== Creating the Increment Resource
+
+Create the `src/main/java/org/acme/redis/IncrementResource.java` file, with the following content:
+
+[source, java]
+----
+package org.acme.redis;
+
+import javax.inject.Inject;
+import javax.ws.rs.GET;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.PUT;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.Produces;
+import javax.ws.rs.Path;
+import javax.ws.rs.POST;
+import javax.ws.rs.DELETE;
+import javax.ws.rs.container.AsyncResponse;
+import javax.ws.rs.container.Suspended;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import java.util.List;
+
+@Path("/increments")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+public class IncrementResource {
+
+    @Inject
+    IncrementService service; <1>
+
+    @GET
+    public List<String> keys() { <2>
+        return service.keys();
+    }
+
+    @POST
+    public Increment create(Increment increment) { <3>
+        service.set(increment.key, increment.value);
+        return increment;
+    }
+
+    @GET
+    @Path("/{key}")
+    public Increment get(@PathParam("key") String key) { <4>
+        return new Increment(key, Integer.valueOf(service.get(key)));
+    }
+
+    @PUT
+    @Path("/{key}")
+    public void increment(@PathParam("key") String key, Integer value) { <5>
+        service.increment(key, value);
+    }
+
+    @DELETE
+    @Path("/{key}")
+    public void delete(@PathParam("key") String key, @Suspended final AsyncResponse asyncResponse) { <6>
+        service.del(key)
+                .thenAccept(x -> asyncResponse.resume(Response.noContent().build()));
+    }
+}
+----
+
+1. Inject the `IncrementService`
+2. Expose list of current increments keys, we have.
+3. Create a new increment using the key and value supplied in the payload
+4. Retrieve an increment given its key
+5. Increment the given key by an operand `value` given in parameter
+6. Asynchronous delete an increment given its key
+
+== Modifying the test class
+
+Edit the `src/test/java/org/acme/redis/IncrementResourceTest.java` file to the following content:
+
+[source, java]
+----
+package org.acme.redis;
+
+import static org.hamcrest.Matchers.is;
+
+import org.junit.jupiter.api.Test;
+
+import io.quarkus.test.junit.QuarkusTest;
+
+import static io.restassured.RestAssured.given;
+
+import io.restassured.http.ContentType;
+
+@QuarkusTest
+public class IncrementResourceTest {
+
+    @Test
+    public void testLibrary() {
+        // verify that we have nothing
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .get("/increments")
+                .then()
+                .statusCode(200)
+                .body("size()", is(0));
+
+        // create a first increment key with an initial value of 0
+        given()
+                .contentType(ContentType.JSON)
+                .accept(ContentType.JSON)
+                .body("{\"key\":\"first-key\",\"value\":0}")
+                .when()
+                .post("/increments")
+                .then()
+                .statusCode(200)
+                .body("key", is("first-key"))
+                .body("value", is(0));
+
+        // create a second increment key with an initial value of 10
+        given()
+                .contentType(ContentType.JSON)
+                .accept(ContentType.JSON)
+                .body("{\"key\":\"second-key\",\"value\":10}")
+                .when()
+                .post("/increments")
+                .then()
+                .statusCode(200)
+                .body("key", is("second-key"))
+                .body("value", is(10));
+
+        // increment first key by 1
+        given()
+                .contentType(ContentType.JSON)
+                .body("1")
+                .when()
+                .put("/increments/first-key")
+                .then()
+                .statusCode(204);
+
+        // verify that key has been incremented
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .get("/increments/first-key")
+                .then()
+                .statusCode(200)
+                .body("key", is("first-key"))
+                .body("value", is(1));
+
+        // increment second key by 1000
+        given()
+                .contentType(ContentType.JSON)
+                .body("1000")
+                .when()
+                .put("/increments/second-key")
+                .then()
+                .statusCode(204);
+
+        // verify that key has been incremented
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .get("/increments/second-key")
+                .then()
+                .statusCode(200)
+                .body("key", is("second-key"))
+                .body("value", is(1010));
+
+        // verify that we have two keys in registered
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .get("/increments")
+                .then()
+                .statusCode(200)
+                .body("size()", is(2));
+
+        // delete first key
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .delete("/increments/first-key")
+                .then()
+                .statusCode(204);
+
+        // verify that we have one key left after deletion
+        given()
+                .accept(ContentType.JSON)
+                .when()
+                .get("/increments")
+                .then()
+                .statusCode(200)
+                .body("size()", is(1));
+    }
+}
+----
+
+== Get it running
+
+If you followed the instructions, you should have the Redis server running.
+Then, you just need to run the application using:
+
+[source, shell]
+----
+./mvnw compile quarkus:dev
+----
+
+Open another terminal and run the `curl http://localhost:8080/increments` command.
+
+== Interacting with the application
+As we have seen above, the API exposes five Rest endpoints.
+In this section we are going to see how to initialise an increment, see the list of current increments,
+incrementing a value given its key, retrieving the current value of an increment, and finally deleting
+a key.
+
+=== Creating a new increment
+
+[source, shell]
+----
+curl -X POST -H "Content-Type: application/json" -d '{"key":"first","value":10}' http://localhost:8080/increments <1>
+----
+
+1. We create the first increment, with the key `first` and an initial value of `10`.
+
+Running the above command should return the result below:
+
+[source, json]
+-----
+{
+  "key": "first",
+  "value": 10
+}
+-----
+
+=== See current increments keys
+
+To see the list of current increments keys, run the following command:
+
+[source, shell]
+----
+curl http://localhost:8080/increments
+----
+
+The above command should return  `["first"]` indicating that we have only one increment thus far.
+
+=== Retrieve an new increment
+
+To retrieve an increment using its key, we will have to run the below command:
+
+[source, shell]
+----
+curl http://localhost:8080/increments/first <1>
+----
+
+1. Running this command, should return the following result:
+
+[source, json]
+----
+{
+  "key": "first",
+  "value": 10
+}
+----
+
+=== Increment a value given its key
+
+To increment a value, run the following command:
+
+[source, shell]
+----
+curl -X PUT -H "Content-Type: application/json" -d '27' http://localhost:8080/increments/first <1>
+----
+
+1. Increment the `first` value by 27.
+
+Now, running the command `curl http://localhost:8080/increments/first` should return the following result:
+
+[source, json]
+----
+{
+  "key": "first",
+  "value": 37 <1>
+}
+----
+
+1. We see that the value of the `first` key is now `37` which is exactly the result of `10 + 27`, quick maths.
+
+=== Deleting a key
+
+Use the command below, to delete an increment given its key.
+
+[source, shell]
+----
+curl -X DELETE  http://localhost:8080/increments/first <1>
+----
+
+1. Delete the `first` increment.
+
+Now, running the command `curl http://localhost:8080/increments` should return an empty list `[]`
+
+== Packaging and run in JVM mode
+
+You can run the application as a conventional jar file.
+
+First, we will need to package it:
+
+[source, shell]
+----
+./mvnw package
+----
+
+NOTE: This command will start a Redis instance to execute the tests. Thus your Redis containers need to be stopped.
+
+Then run it:
+
+[source, shell]
+----
+java -jar ./target/redis-quickstart-1.0-SNAPSHOT-runner.jar
+----
+
+== Running Native
+
+You can also create a native executable from this application without making any
+source code changes. A native executable removes the dependency on the JVM:
+everything needed to run the application on the target platform is included in
+the executable, allowing the application to run with minimal resource overhead.
+
+Compiling a native executable takes a bit longer, as GraalVM performs additional
+steps to remove unnecessary codepaths. Use the  `native` profile to compile a
+native executable:
+
+[source, shell]
+----
+./mvnw package -Pnative
+----
+
+Once the build is finished, you can run the executable with:
+
+[source, shell]
+----
+./target/redis-quickstart-1.0-SNAPSHOT-runner
+----
+
+
+== Configuration Reference
+
+include::{generated-dir}/config/quarkus-redis.adoc[opts=optional, leveloffset=+1]
